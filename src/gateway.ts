@@ -3,11 +3,14 @@ import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { AEMConnector } from './aem-connector.js';
 import { MCPRequestHandler } from './mcp-handler.js';
+import { createMcpServer } from './mcp-server.js';
 import { logger, loggingMiddleware, generateRequestId } from './logger.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJSDoc from 'swagger-jsdoc';
+import { parseRuntimeArgs } from './runtime-args.js';
 // import llmRouter from './llm-integration.js';
 // import telegramIntegration from './telegram-integration.js';
 
@@ -46,8 +49,9 @@ if (process.env.MCP_USERNAME && process.env.MCP_PASSWORD) {
   app.use('/mcp', basicAuth);
 }
 
-const aemConnector = new AEMConnector();
+const aemConnector = new AEMConnector(parseRuntimeArgs());
 const mcpHandler = new MCPRequestHandler(aemConnector);
+const mcpServer = createMcpServer(aemConnector);
 
 // Method validation middleware
 const validateMethod = (req: Request, res: Response, next: NextFunction) => {
@@ -126,13 +130,14 @@ app.get('/health', async (req, res) => {
       status: aemConnected ? 'healthy' : 'degraded',
       aem: {
         connected: aemConnected,
-        host: process.env.AEM_HOST || 'http://localhost:4502',
+        host: aemConnector.config.aem.host,
+        authMode: aemConnector.config.authMode,
         lastChecked: new Date().toISOString()
       },
       mcp: {
         status: 'ready',
         methodCount: mcpHandler.getAvailableMethods().length,
-        version: '1.0.0'
+        version: '1.1.0'
       },
       server: {
         uptime: process.uptime(),
@@ -167,11 +172,15 @@ app.get('/health/detailed', async (req, res) => {
       timestamp: new Date().toISOString(),
       aem: {
         connected: aemConnected,
-        host: process.env.AEM_HOST || 'http://localhost:4502',
+        host: aemConnector.config.aem.host,
         credentials: {
-          username: process.env.AEM_SERVICE_USER || 'admin',
-          configured: !!(process.env.AEM_SERVICE_USER && process.env.AEM_SERVICE_PASSWORD)
-        }
+          mode: aemConnector.config.authMode,
+          username: aemConnector.config.aem.serviceUser.username,
+          configured: aemConnector.config.authMode === 'jwt'
+            ? !!aemConnector.config.bearerToken
+            : !!(aemConnector.config.aem.serviceUser.username && aemConnector.config.aem.serviceUser.password)
+        },
+        authMode: aemConnector.config.authMode
       },
       mcp: {
         status: 'ready',
@@ -183,7 +192,7 @@ app.get('/health/detailed', async (req, res) => {
           acc[category] = (acc[category] || 0) + 1;
           return acc;
         }, {}),
-        version: '1.0.0'
+        version: '1.1.0'
       },
       server: {
         uptime: process.uptime(),
@@ -215,6 +224,18 @@ app.get('/health/detailed', async (req, res) => {
 });
 
 app.post('/mcp', async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    sessionIdGenerator: undefined,
+  });
+
+  res.on('close', () => transport.close());
+
+  await mcpServer.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+
+app.post('/mcp/legacy', async (req, res) => {
   const requestId = (req as any).requestId;
   const startTime = Date.now();
   

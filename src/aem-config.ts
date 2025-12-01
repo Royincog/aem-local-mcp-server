@@ -94,8 +94,43 @@ export const DEFAULT_AEM_CONFIG: AEMConfig = {
   strictReplication: process.env.AEM_STRICT_REPLICATION === 'true',
 };
 
-export function getAEMConfig(): AEMConfig {
-  return DEFAULT_AEM_CONFIG;
+export function getAEMConfig(overrides: Partial<AEMConfig> = {}): AEMConfig {
+  return {
+    ...DEFAULT_AEM_CONFIG,
+    ...overrides,
+    serviceUser: {
+      ...DEFAULT_AEM_CONFIG.serviceUser,
+      ...(overrides.serviceUser || {}),
+    },
+    endpoints: {
+      ...DEFAULT_AEM_CONFIG.endpoints,
+      ...(overrides.endpoints || {}),
+    },
+    contentPaths: {
+      ...DEFAULT_AEM_CONFIG.contentPaths,
+      ...(overrides.contentPaths || {}),
+    },
+    replication: {
+      ...DEFAULT_AEM_CONFIG.replication,
+      ...(overrides.replication || {}),
+    },
+    components: {
+      ...DEFAULT_AEM_CONFIG.components,
+      ...(overrides.components || {}),
+      defaultProperties: {
+        ...DEFAULT_AEM_CONFIG.components.defaultProperties,
+        ...(overrides.components?.defaultProperties || {}),
+      },
+    },
+    queries: {
+      ...DEFAULT_AEM_CONFIG.queries,
+      ...(overrides.queries || {}),
+    },
+    validation: {
+      ...DEFAULT_AEM_CONFIG.validation,
+      ...(overrides.validation || {}),
+    },
+  };
 }
 
 export function isValidContentPath(path: string, config: AEMConfig = DEFAULT_AEM_CONFIG): boolean {

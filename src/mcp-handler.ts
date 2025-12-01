@@ -110,7 +110,8 @@ export class MCPRequestHandler {
           throw new Error(`Unknown method: ${method}`);
       }
     } catch (error: any) {
-      return { error: error.message, method, params };
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Method ${method} failed: ${message}`);
     }
   }
 

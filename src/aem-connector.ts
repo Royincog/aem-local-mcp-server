@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import dotenv from 'dotenv';
 import { getAEMConfig, isValidContentPath, isValidComponentType, isValidLocale, AEMConfig } from './aem-config.js';
 import {
@@ -12,8 +12,13 @@ import {
 } from './error-handler.js';
 import { WorkflowOperations } from './operations/workflow-operations.js';
 import { VersionOperations } from './operations/version-operations.js';
+import { parseRuntimeArgs, RuntimeArgs, AuthMode } from './runtime-args.js';
 
 dotenv.config();
+
+type ConnectorAuth =
+  | { type: 'basic'; username: string; password: string }
+  | { type: 'jwt'; token: string; username?: string };
 
 export interface AEMConnectorConfig {
   aem: {
@@ -26,6 +31,8 @@ export interface AEMConnectorConfig {
     };
     endpoints: Record<string, string>;
   };
+  authMode: AuthMode;
+  bearerToken?: string;
   mcp: {
     name: string;
     version: string;
@@ -34,36 +41,68 @@ export interface AEMConnectorConfig {
 
 export class AEMConnector {
   config: AEMConnectorConfig;
-  auth: { username: string; password: string };
+  auth: ConnectorAuth;
   aemConfig: AEMConfig;
   private workflowOps: WorkflowOperations;
   private versionOps: VersionOperations;
 
-  constructor() {
-    this.config = this.loadConfig();
-    this.aemConfig = getAEMConfig();
-    this.auth = {
-      username: process.env.AEM_SERVICE_USER || this.config.aem.serviceUser.username,
-      password: process.env.AEM_SERVICE_PASSWORD || this.config.aem.serviceUser.password,
-    };
-    if (process.env.AEM_HOST) {
-      this.config.aem.host = process.env.AEM_HOST;
-      this.config.aem.author = process.env.AEM_HOST;
-    }
+  constructor(options: RuntimeArgs = {}) {
+    const runtimeArgs = parseRuntimeArgs();
+    const mergedOptions = { ...runtimeArgs, ...options };
+
+    this.auth = this.resolveAuth(mergedOptions);
+    this.config = this.loadConfig(mergedOptions, this.auth);
+    this.aemConfig = getAEMConfig({
+      host: this.config.aem.host,
+      author: this.config.aem.author,
+      publish: this.config.aem.publish,
+      serviceUser: {
+        username: this.auth.type === 'basic' ? this.auth.username : this.auth.username || 'token-user',
+        password: this.auth.type === 'basic' ? this.auth.password : 'token-auth',
+      },
+    });
+
     this.workflowOps = new WorkflowOperations(this.createAxiosInstance(), console as any, this.aemConfig);
     this.versionOps = new VersionOperations(this.createAxiosInstance(), console as any, this.aemConfig);
   }
 
-  loadConfig(): AEMConnectorConfig {
+  private resolveAuth(options: RuntimeArgs): ConnectorAuth {
+    const authType = (options.authType || process.env.AEM_AUTH_TYPE || 'basic') as AuthMode;
+
+    if (authType === 'jwt') {
+      const token = options.token || process.env.AEM_JWT || process.env.AEM_TOKEN || process.env.AEM_DEV_TOKEN;
+      if (!token) {
+        throw new Error('A JWT token is required when auth type is jwt. Pass it via --token or --jwt argument.');
+      }
+      return {
+        type: 'jwt',
+        token,
+        username: options.username || process.env.AEM_SERVICE_USER,
+      };
+    }
+
+    return {
+      type: 'basic',
+      username: options.username || process.env.AEM_SERVICE_USER || 'admin',
+      password: options.password || process.env.AEM_SERVICE_PASSWORD || 'admin',
+    };
+  }
+
+  loadConfig(options: RuntimeArgs = {}, auth: ConnectorAuth): AEMConnectorConfig {
+    const host = options.host || process.env.AEM_HOST || 'http://localhost:4502';
+    const author = options.author || process.env.AEM_AUTHOR || host;
+    const publish = options.publish || process.env.AEM_PUBLISH || 'http://localhost:4503';
+    const serviceUser =
+      auth.type === 'basic'
+        ? { username: auth.username, password: auth.password }
+        : { username: auth.username || 'token-user', password: 'token-auth' };
+
     return {
       aem: {
-        host: process.env.AEM_HOST || 'http://localhost:4502',
-        author: process.env.AEM_HOST || 'http://localhost:4502',
-        publish: 'http://localhost:4503',
-        serviceUser: {
-          username: 'admin',
-          password: 'admin',
-        },
+        host,
+        author,
+        publish,
+        serviceUser,
         endpoints: {
           content: '/content',
           dam: '/content/dam',
@@ -72,6 +111,8 @@ export class AEMConnector {
           jcr: '',
         },
       },
+      authMode: auth.type,
+      bearerToken: auth.type === 'jwt' ? auth.token : undefined,
       mcp: {
         name: 'AEM MCP Server',
         version: '1.0.0',
@@ -80,15 +121,27 @@ export class AEMConnector {
   }
 
   createAxiosInstance(): AxiosInstance {
-    return axios.create({
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+
+    const axiosConfig: AxiosRequestConfig = {
       baseURL: this.config.aem.host,
-      auth: this.auth,
       timeout: 30000,
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-    });
+      headers,
+    };
+
+    if (this.auth.type === 'jwt') {
+      headers.Authorization = `Bearer ${this.auth.token}`;
+    } else {
+      axiosConfig.auth = {
+        username: this.auth.username,
+        password: this.auth.password,
+      };
+    }
+
+    return axios.create(axiosConfig);
   }
 
   async testConnection(): Promise<boolean> {

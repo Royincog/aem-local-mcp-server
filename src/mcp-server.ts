@@ -1,31 +1,31 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { AEMConnector } from './aem-connector.js';
+import { z, ZodTypeAny } from 'zod';
 import dotenv from 'dotenv';
+import { AEMConnector } from './aem-connector.js';
+import { MCPRequestHandler } from './mcp-handler.js';
+import { parseRuntimeArgs } from './runtime-args.js';
 
 dotenv.config();
 
-const aemConnector = new AEMConnector();
-
-const server = new Server({
-  name: 'aem-mcp-agent',
-  version: '1.0.0',
-}, {
-  capabilities: {
-    resources: {},
-    tools: {},
-    prompts: {},
-  },
-});
+type JsonSchema = {
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  required?: string[];
+};
 
 type ToolDefinition = {
   name: string;
   description?: string;
-  inputSchema: object;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, JsonSchema>;
+    required?: string[];
+  };
 };
 
-const tools: ToolDefinition[] = [
+const toolDefinitions: ToolDefinition[] = [
   {
     name: 'validateComponent',
     description: 'Validate component changes before applying them',
@@ -424,13 +424,13 @@ const tools: ToolDefinition[] = [
             type: 'object',
             properties: {
               componentPath: { type: 'string' },
-              properties: { type: 'object' }
+              properties: { type: 'object' },
             },
-            required: ['componentPath', 'properties']
-          }
+            required: ['componentPath', 'properties'],
+          },
         },
         validateFirst: { type: 'boolean' },
-        continueOnError: { type: 'boolean' }
+        continueOnError: { type: 'boolean' },
       },
       required: ['updates'],
     },
@@ -444,7 +444,7 @@ const tools: ToolDefinition[] = [
         model: { type: 'string' },
         payloadPath: { type: 'string' },
         title: { type: 'string' },
-        comment: { type: 'string' }
+        comment: { type: 'string' },
       },
       required: ['model', 'payloadPath'],
     },
@@ -455,8 +455,8 @@ const tools: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        limit: { type: 'number' }
-      }
+        limit: { type: 'number' },
+      },
     },
   },
   {
@@ -467,7 +467,7 @@ const tools: ToolDefinition[] = [
       properties: {
         workflowId: { type: 'string' },
         stepName: { type: 'string' },
-        comment: { type: 'string' }
+        comment: { type: 'string' },
       },
       required: ['workflowId', 'stepName'],
     },
@@ -479,7 +479,7 @@ const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         workflowId: { type: 'string' },
-        reason: { type: 'string' }
+        reason: { type: 'string' },
       },
       required: ['workflowId'],
     },
@@ -491,7 +491,7 @@ const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         workflowId: { type: 'string' },
-        reason: { type: 'string' }
+        reason: { type: 'string' },
       },
       required: ['workflowId'],
     },
@@ -502,7 +502,7 @@ const tools: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        workflowId: { type: 'string' }
+        workflowId: { type: 'string' },
       },
       required: ['workflowId'],
     },
@@ -518,7 +518,7 @@ const tools: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string' }
+        path: { type: 'string' },
       },
       required: ['path'],
     },
@@ -531,7 +531,7 @@ const tools: ToolDefinition[] = [
       properties: {
         path: { type: 'string' },
         label: { type: 'string' },
-        comment: { type: 'string' }
+        comment: { type: 'string' },
       },
       required: ['path'],
     },
@@ -543,7 +543,7 @@ const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         path: { type: 'string' },
-        versionName: { type: 'string' }
+        versionName: { type: 'string' },
       },
       required: ['path', 'versionName'],
     },
@@ -556,7 +556,7 @@ const tools: ToolDefinition[] = [
       properties: {
         path: { type: 'string' },
         version1: { type: 'string' },
-        version2: { type: 'string' }
+        version2: { type: 'string' },
       },
       required: ['path', 'version1', 'version2'],
     },
@@ -568,272 +568,105 @@ const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         path: { type: 'string' },
-        versionName: { type: 'string' }
+        versionName: { type: 'string' },
       },
       required: ['path', 'versionName'],
     },
   },
 ];
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
-});
+const mapTypeToZod = (property: JsonSchema): ZodTypeAny => {
+  switch (property.type) {
+    case 'string':
+      return z.string();
+    case 'number':
+      return z.number();
+    case 'boolean':
+      return z.boolean();
+    case 'array':
+      return z.array(mapTypeToZod(property.items ?? { type: 'string' }));
+    case 'object': {
+      if (property.properties) {
+        const required = new Set(property.required ?? []);
+        const nestedShape: Record<string, ZodTypeAny> = {};
 
-server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
-  const { name, arguments: args } = request.params;
-  if (!args) {
-    return {
-      content: [
-        { type: 'text', text: 'Error: No arguments provided' },
-      ],
-      isError: true,
-    };
-  }
-  try {
-    switch (name) {
-      case 'validateComponent': {
-        const result = await aemConnector.validateComponent({
-          locale: args.locale,
-          page_path: args.pagePath,
-          component: args.component,
-          props: args.props,
+        Object.entries(property.properties).forEach(([key, value]) => {
+          const nestedType = mapTypeToZod(value);
+          nestedShape[key] = required.has(key) ? nestedType : nestedType.optional();
         });
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+
+        return z.object(nestedShape).passthrough();
       }
-      case 'updateComponent': {
-        const result = await aemConnector.updateComponent(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'undoChanges': {
-        const result = await aemConnector.undoChanges(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'scanPageComponents': {
-        const pagePath = (args as { pagePath: string }).pagePath;
-        const result = await aemConnector.scanPageComponents(pagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'fetchSites': {
-        const result = await aemConnector.fetchSites();
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'fetchLanguageMasters': {
-        const site = (args as { site: string }).site;
-        const result = await aemConnector.fetchLanguageMasters(site);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'fetchAvailableLocales': {
-        const { site, languageMasterPath } = args as { site: string; languageMasterPath: string };
-        const result = await aemConnector.fetchAvailableLocales(site, languageMasterPath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'replicateAndPublish': {
-        const result = await aemConnector.replicateAndPublish(args.selectedLocales, args.componentData, args.localizedOverrides);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getAllTextContent': {
-        const pagePath = (args as { pagePath: string }).pagePath;
-        const result = await aemConnector.getAllTextContent(pagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getPageTextContent': {
-        const pagePath = (args as { pagePath: string }).pagePath;
-        const result = await aemConnector.getPageTextContent(pagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getPageImages': {
-        const pagePath = (args as { pagePath: string }).pagePath;
-        const result = await aemConnector.getPageImages(pagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'updateImagePath': {
-        const { componentPath, newImagePath } = args as { componentPath: string; newImagePath: string };
-        const result = await aemConnector.updateImagePath(componentPath, newImagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getPageContent': {
-        const pagePath = (args as { pagePath: string }).pagePath;
-        const result = await aemConnector.getPageContent(pagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'listPages': {
-        const { siteRoot, depth, limit } = args as { siteRoot: string; depth: number; limit: number };
-        const result = await aemConnector.listPages(siteRoot, depth, limit);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getNodeContent': {
-        const { path, depth } = args as { path: string; depth: number };
-        const result = await aemConnector.getNodeContent(path, depth);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'listChildren': {
-        const path = (args as { path: string }).path;
-        const children = await aemConnector.listChildren(path);
-        return { content: [{ type: 'text', text: JSON.stringify({ children }, null, 2) }] };
-      }
-      case 'getPageProperties': {
-        const pagePath = (args as { pagePath: string }).pagePath;
-        const result = await aemConnector.getPageProperties(pagePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'searchContent': {
-        const result = await aemConnector.searchContent(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'executeJCRQuery': {
-        const { query, limit } = args as { query: string; limit: number };
-        const result = await aemConnector.executeJCRQuery(query, limit);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getAssetMetadata': {
-        const assetPath = (args as { assetPath: string }).assetPath;
-        const result = await aemConnector.getAssetMetadata(assetPath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getStatus': {
-        const result = await aemConnector.getWorkflowStatus(args.workflowId);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'listMethods': {
-        const result = tools;
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'enhancedPageSearch': {
-        const result = await aemConnector.enhancedPageSearch(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'createPage': {
-        const result = await aemConnector.createPage(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'deletePage': {
-        const result = await aemConnector.deletePage(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'createComponent': {
-        const result = await aemConnector.createComponent(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'deleteComponent': {
-        const result = await aemConnector.deleteComponent(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'unpublishContent': {
-        const result = await aemConnector.unpublishContent(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'activatePage': {
-        const result = await aemConnector.activatePage(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'deactivatePage': {
-        const result = await aemConnector.deactivatePage(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'uploadAsset': {
-        const result = await aemConnector.uploadAsset(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'updateAsset': {
-        const result = await aemConnector.updateAsset(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'deleteAsset': {
-        const result = await aemConnector.deleteAsset(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getTemplates': {
-        const sitePath = (args as { sitePath: string }).sitePath;
-        const result = await aemConnector.getTemplates(sitePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getTemplateStructure': {
-        const templatePath = (args as { templatePath: string }).templatePath;
-        const result = await aemConnector.getTemplateStructure(templatePath);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'bulkUpdateComponents': {
-        const result = await aemConnector.bulkUpdateComponents(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'startWorkflow': {
-        const result = await aemConnector.startWorkflow(args);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'listActiveWorkflows': {
-        const limit = (args as { limit?: number }).limit;
-        const result = await aemConnector.listActiveWorkflows(limit);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'completeWorkflowStep': {
-        const { workflowId, stepName, comment } = args as { workflowId: string; stepName: string; comment?: string };
-        const result = await aemConnector.completeWorkflowStep(workflowId, stepName, comment);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'cancelWorkflow': {
-        const { workflowId, reason } = args as { workflowId: string; reason?: string };
-        const result = await aemConnector.cancelWorkflow(workflowId, reason);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'suspendWorkflow': {
-        const { workflowId, reason } = args as { workflowId: string; reason?: string };
-        const result = await aemConnector.suspendWorkflow(workflowId, reason);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'resumeWorkflow': {
-        const workflowId = (args as { workflowId: string }).workflowId;
-        const result = await aemConnector.resumeWorkflow(workflowId);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getWorkflowModels': {
-        const result = await aemConnector.getWorkflowModels();
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'getVersionHistory': {
-        const path = (args as { path: string }).path;
-        const result = await aemConnector.getVersionHistory(path);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'createVersion': {
-        const { path, label, comment } = args as { path: string; label?: string; comment?: string };
-        const result = await aemConnector.createVersion(path, label, comment);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'restoreVersion': {
-        const { path, versionName } = args as { path: string; versionName: string };
-        const result = await aemConnector.restoreVersion(path, versionName);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'compareVersions': {
-        const { path, version1, version2 } = args as { path: string; version1: string; version2: string };
-        const result = await aemConnector.compareVersions(path, version1, version2);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      case 'deleteVersion': {
-        const { path, versionName } = args as { path: string; versionName: string };
-        const result = await aemConnector.deleteVersion(path, versionName);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+      return z.record(z.string(), z.any());
     }
-  } catch (error: any) {
-    return {
-      content: [{ type: 'text', text: `Error: ${error.message}` }],
-      isError: true,
-    };
+    default:
+      return z.any();
   }
+};
+
+const buildZodSchema = (schema: ToolDefinition['inputSchema']) => {
+  const required = new Set(schema.required ?? []);
+  const shape: Record<string, ZodTypeAny> = {};
+
+  Object.entries(schema.properties ?? {}).forEach(([key, property]) => {
+    const zodType = mapTypeToZod(property);
+    shape[key] = required.has(key) ? zodType : zodType.optional();
+  });
+
+  return z.object(shape).passthrough();
+};
+
+const formatToolResult = (data: unknown, isError = false) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+  structuredContent: isError ? undefined : data,
+  isError,
 });
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  // eslint-disable-next-line no-console
-  console.error('AEM MCP Server running as a standard MCP handler (stdio transport)');
+export function createMcpServer(aemConnector: AEMConnector): McpServer {
+  const server = new McpServer({
+    name: 'aem-mcp-agent',
+    version: '1.1.0',
+  });
+
+  const handler = new MCPRequestHandler(aemConnector);
+
+  for (const tool of toolDefinitions) {
+    const inputSchema = buildZodSchema(tool.inputSchema) as ZodTypeAny;
+
+    (server as any).registerTool(
+      tool.name,
+      {
+        title: tool.name,
+        description: tool.description ?? tool.name,
+        inputSchema,
+      },
+      async (args: Record<string, unknown>) => {
+        try {
+          const result = await handler.handleRequest(tool.name, args ?? {});
+          return formatToolResult(result) as any;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return formatToolResult({ error: message }, true) as any;
+        }
+      },
+    );
+  }
+
+  return server;
 }
 
-main().catch((error) => {
+export async function startStdioServer() {
+  const transport = new StdioServerTransport();
+  const server = createMcpServer(new AEMConnector(parseRuntimeArgs()));
+  await server.connect(transport);
   // eslint-disable-next-line no-console
-  console.error('Fatal error:', error);
-  process.exit(1);
-}); 
+  console.error('AEM MCP server running as a standard MCP handler (stdio transport)');
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  startStdioServer().catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
+}
